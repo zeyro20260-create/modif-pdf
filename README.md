@@ -52,7 +52,9 @@ resources/                 Icônes pour electron-builder (à fournir avant packa
 - Visualiser les pages (zoom, miniatures).
 - **Organiser** : réordonner par glisser-déposer, pivoter, supprimer, fusionner un autre PDF, extraire une
   page, ajouter des pages depuis des images (JPEG/PNG).
-- **Éditer (overlay)** : ajouter du texte et des images cliquables, positionnées librement sur la page.
+- **Éditer (overlay)** : ajouter du texte et des images, les déplacer (glisser) et les redimensionner
+  (images) avant validation ; chaque overlay reste un brouillon modifiable tant qu'il n'est pas validé
+  (✓), annulé (✕) ou implicitement validé par un changement d'outil/page/sauvegarde.
 - **Formulaires** : détection des champs AcroForm (texte, case à cocher, radio, liste déroulante),
   modification des valeurs, aplatissement final.
 - **Signature** : pavé de dessin à la souris/tactile, tamponnage sur la page.
@@ -61,7 +63,8 @@ resources/                 Icônes pour electron-builder (à fournir avant packa
 
 ## Pistes d'évolution (non implémentées)
 
-- Déplacer/redimensionner un overlay après l'avoir posé (actuellement : position fixe au clic).
+- Redimensionner un overlay de texte (actuellement seule la taille de police se règle, pas une boîte
+  avec retour à la ligne automatique).
 - Redaction réelle (suppression du contenu sous le cache, pas juste un rectangle par-dessus).
 - OCR sur PDF scannés.
 - Édition "in place" du texte natif du PDF (lecture du content stream, remplacement heuristique).

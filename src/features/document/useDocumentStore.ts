@@ -18,7 +18,9 @@ import {
   flattenForm as engineFlattenForm,
   saveToBytes,
 } from "@/lib/pdfEngine";
-import type { ToolId, FormFieldState } from "./documentTypes";
+import { detectImageFormat } from "@/lib/imageFormat";
+import { arrayBufferToDataUrl, loadImageNaturalSize } from "@/lib/dataUrl";
+import type { ToolId, FormFieldState, DraftOverlay } from "./documentTypes";
 
 interface DocumentState {
   fileName: string | null;
@@ -35,6 +37,7 @@ interface DocumentState {
   lastSignatureDataUrl: string | null;
   undoStack: ArrayBuffer[];
   redoStack: ArrayBuffer[];
+  draftOverlays: DraftOverlay[];
 
   openFromBytes: (fileName: string, bytes: ArrayBuffer) => Promise<void>;
   newBlankDocument: () => Promise<void>;
@@ -52,6 +55,13 @@ interface DocumentState {
 
   addTextAt: (pageIndex: number, xRatio: number, yRatio: number, text: string, fontSize: number, colorHex: string) => Promise<void>;
   addImageAt: (pageIndex: number, xRatio: number, yRatio: number, widthRatio: number, heightRatio: number, imageBytes: ArrayBuffer) => Promise<void>;
+
+  addDraftText: (pageIndex: number, xRatio: number, yRatio: number) => string;
+  addDraftImage: (pageIndex: number, xRatio: number, yRatio: number, imageBytes: ArrayBuffer) => Promise<string>;
+  updateDraftOverlay: (id: string, patch: Partial<DraftOverlay>) => void;
+  removeDraftOverlay: (id: string) => void;
+  commitDraftOverlay: (id: string) => Promise<void>;
+  commitAllDraftOverlays: () => Promise<void>;
 
   refreshFormFields: () => void;
   updateFormFieldValue: (field: FormFieldState, value: string) => Promise<void>;
@@ -101,6 +111,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   lastSignatureDataUrl: null,
   undoStack: [],
   redoStack: [],
+  draftOverlays: [],
 
   openFromBytes: async (fileName, bytes) => {
     set({ isBusy: true, errorMessage: null });
@@ -116,6 +127,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
         formFields: listFormFields(pdfLibDoc),
         undoStack: [],
         redoStack: [],
+        draftOverlays: [],
       });
     } catch (err) {
       set({ errorMessage: (err as Error).message });
@@ -138,11 +150,18 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
       formFields: [],
       undoStack: [],
       redoStack: [],
+      draftOverlays: [],
     });
   },
 
-  setActiveTool: (tool) => set({ activeTool: tool }),
-  setCurrentPage: (index) => set({ currentPageIndex: index }),
+  setActiveTool: (tool) => {
+    set({ activeTool: tool });
+    void get().commitAllDraftOverlays();
+  },
+  setCurrentPage: (index) => {
+    set({ currentPageIndex: index });
+    void get().commitAllDraftOverlays();
+  },
   setZoom: (zoom) => set({ zoom: Math.min(Math.max(zoom, 0.3), 4) }),
 
   rotateCurrentPage: async (delta) => {
@@ -201,6 +220,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   },
 
   splitCurrentPageOut: async (pageIndex) => {
+    await get().commitAllDraftOverlays();
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) throw new Error("Aucun document ouvert.");
     const extracted = await extractPagesAsNewDocument(pdfLibDoc, [pageIndex]);
@@ -223,6 +243,87 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     await drawImageOverlay(pdfLibDoc, { pageIndex, xRatio, yRatio, widthRatio, heightRatio, imageBytes });
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({ pdfJsDoc, pageCount, isDirty: true });
+  },
+
+  addDraftText: (pageIndex, xRatio, yRatio) => {
+    const id = crypto.randomUUID();
+    const draft: DraftOverlay = {
+      id,
+      pageIndex,
+      kind: "text",
+      xRatio,
+      yRatio,
+      fontSize: 16,
+      colorHex: "#111111",
+      text: "",
+    };
+    set((state) => ({ draftOverlays: [...state.draftOverlays, draft] }));
+    return id;
+  },
+
+  addDraftImage: async (pageIndex, xRatio, yRatio, imageBytes) => {
+    const { pdfLibDoc } = get();
+    if (!pdfLibDoc) return "";
+    const format = detectImageFormat(imageBytes);
+    const previewUrl = arrayBufferToDataUrl(imageBytes, format === "png" ? "image/png" : "image/jpeg");
+
+    // Default to a sensible on-page width, then derive height from the image's own
+    // aspect ratio so it doesn't appear stretched before the user resizes it.
+    const widthRatio = 0.3;
+    let heightRatio = 0.3;
+    try {
+      const { width: pageWidth, height: pageHeight } = pdfLibDoc.getPage(pageIndex).getSize();
+      const natural = await loadImageNaturalSize(previewUrl);
+      heightRatio = (widthRatio * pageWidth * natural.height) / (pageHeight * natural.width);
+    } catch {
+      // Fall back to the square default above if dimensions can't be read.
+    }
+
+    const id = crypto.randomUUID();
+    const draft: DraftOverlay = {
+      id,
+      pageIndex,
+      kind: "image",
+      xRatio,
+      yRatio,
+      widthRatio,
+      heightRatio,
+      imageBytes,
+      previewUrl,
+    };
+    set((state) => ({ draftOverlays: [...state.draftOverlays, draft] }));
+    return id;
+  },
+
+  updateDraftOverlay: (id, patch) => {
+    set((state) => ({
+      draftOverlays: state.draftOverlays.map((overlay) =>
+        overlay.id === id ? ({ ...overlay, ...patch } as DraftOverlay) : overlay
+      ),
+    }));
+  },
+
+  removeDraftOverlay: (id) => {
+    set((state) => ({ draftOverlays: state.draftOverlays.filter((overlay) => overlay.id !== id) }));
+  },
+
+  commitDraftOverlay: async (id) => {
+    const overlay = get().draftOverlays.find((o) => o.id === id);
+    if (!overlay) return;
+    if (overlay.kind === "text") {
+      if (overlay.text.trim().length > 0) {
+        await get().addTextAt(overlay.pageIndex, overlay.xRatio, overlay.yRatio, overlay.text, overlay.fontSize, overlay.colorHex);
+      }
+    } else {
+      await get().addImageAt(overlay.pageIndex, overlay.xRatio, overlay.yRatio, overlay.widthRatio, overlay.heightRatio, overlay.imageBytes);
+    }
+    set((state) => ({ draftOverlays: state.draftOverlays.filter((o) => o.id !== id) }));
+  },
+
+  commitAllDraftOverlays: async () => {
+    for (const overlay of get().draftOverlays) {
+      await get().commitDraftOverlay(overlay.id);
+    }
   },
 
   refreshFormFields: () => {
@@ -295,6 +396,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   },
 
   exportBytes: async () => {
+    await get().commitAllDraftOverlays();
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) throw new Error("Aucun document ouvert.");
     return saveToBytes(pdfLibDoc);

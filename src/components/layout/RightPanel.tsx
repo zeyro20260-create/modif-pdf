@@ -25,8 +25,18 @@ export function RightPanel() {
       </h3>
 
       {activeTool === "select" && <Hint>Choisissez un outil dans la barre du haut pour commencer à éditer.</Hint>}
-      {activeTool === "text" && <Hint>Cliquez n'importe où sur la page pour placer un champ de texte.</Hint>}
-      {activeTool === "image" && <Hint>Cliquez sur la page pour choisir une image à insérer à cet endroit.</Hint>}
+      {activeTool === "text" && (
+        <Hint>
+          Cliquez sur la page pour placer un champ de texte. Faites-le glisser par la poignée ⠿, réglez
+          taille/couleur, puis validez avec ✓ (ou changez d'outil/page pour valider automatiquement).
+        </Hint>
+      )}
+      {activeTool === "image" && (
+        <Hint>
+          Cliquez sur la page pour insérer une image. Glissez-la pour la déplacer, utilisez la poignée en
+          bas à droite pour la redimensionner, puis validez avec ✓.
+        </Hint>
+      )}
       {activeTool === "signature" && <SignaturePad />}
       {activeTool === "organize" && <OrganizePanel />}
       {activeTool === "forms" && <FormsPanel />}
