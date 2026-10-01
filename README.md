@@ -36,7 +36,7 @@ src/                       Renderer (React)
     toolpanels/             SignaturePad, FormsPanel, OrganizePanel
   features/document/
     useDocumentStore.ts     État global : document chargé, page courante, outil actif, champs de formulaire
-    documentTypes.ts         Types partagés (ToolId, OverlayObject, FormFieldState...)
+    documentTypes.ts         Types partagés (ToolId, FormFieldState...)
   lib/
     pdfEngine.ts            Toute la logique pdf.js/pdf-lib (rendu, rotation, fusion, overlay, formulaires)
     imageFormat.ts           Détection PNG/JPEG par magic bytes
@@ -56,11 +56,12 @@ resources/                 Icônes pour electron-builder (à fournir avant packa
 - **Formulaires** : détection des champs AcroForm (texte, case à cocher, radio, liste déroulante),
   modification des valeurs, aplatissement final.
 - **Signature** : pavé de dessin à la souris/tactile, tamponnage sur la page.
+- **Annuler/Rétablir** : historique (jusqu'à 25 étapes) sur les opérations structurelles (pages, overlays,
+  aplatissement de formulaire), via les boutons de la barre d'outils ou Ctrl+Z / Ctrl+Y.
 
 ## Pistes d'évolution (non implémentées)
 
 - Déplacer/redimensionner un overlay après l'avoir posé (actuellement : position fixe au clic).
-- Undo/redo.
 - Redaction réelle (suppression du contenu sous le cache, pas juste un rectangle par-dessus).
 - OCR sur PDF scannés.
 - Édition "in place" du texte natif du PDF (lecture du content stream, remplacement heuristique).

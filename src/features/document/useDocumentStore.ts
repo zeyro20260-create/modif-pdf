@@ -33,6 +33,8 @@ interface DocumentState {
   errorMessage: string | null;
   formFields: FormFieldState[];
   lastSignatureDataUrl: string | null;
+  undoStack: ArrayBuffer[];
+  redoStack: ArrayBuffer[];
 
   openFromBytes: (fileName: string, bytes: ArrayBuffer) => Promise<void>;
   newBlankDocument: () => Promise<void>;
@@ -57,12 +59,31 @@ interface DocumentState {
 
   setLastSignature: (dataUrl: string) => void;
 
+  undo: () => Promise<void>;
+  redo: () => Promise<void>;
+
   exportBytes: () => Promise<ArrayBuffer>;
 }
+
+const MAX_HISTORY = 25;
 
 async function resync(pdfLibDoc: PDFDocument) {
   const pdfJsDoc = await resyncPdfJs(pdfLibDoc);
   return { pdfJsDoc, pageCount: pdfLibDoc.getPageCount() };
+}
+
+/**
+ * Snapshots the document's current bytes onto the undo stack before a mutation is
+ * applied. Byte snapshots (rather than cloning the live PDFDocument) keep undo/redo
+ * trivially correct: reloading bytes with pdf-lib + pdf.js always reproduces an
+ * identical, fully independent document state.
+ */
+async function pushUndoSnapshot(get: () => DocumentState, set: (partial: Partial<DocumentState>) => void) {
+  const { pdfLibDoc, undoStack } = get();
+  if (!pdfLibDoc) return;
+  const bytes = await saveToBytes(pdfLibDoc);
+  const nextStack = [...undoStack, bytes].slice(-MAX_HISTORY);
+  set({ undoStack: nextStack, redoStack: [] });
 }
 
 export const useDocumentStore = create<DocumentState>((set, get) => ({
@@ -78,6 +99,8 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   errorMessage: null,
   formFields: [],
   lastSignatureDataUrl: null,
+  undoStack: [],
+  redoStack: [],
 
   openFromBytes: async (fileName, bytes) => {
     set({ isBusy: true, errorMessage: null });
@@ -91,6 +114,8 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
         currentPageIndex: 0,
         isDirty: false,
         formFields: listFormFields(pdfLibDoc),
+        undoStack: [],
+        redoStack: [],
       });
     } catch (err) {
       set({ errorMessage: (err as Error).message });
@@ -111,6 +136,8 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
       currentPageIndex: 0,
       isDirty: true,
       formFields: [],
+      undoStack: [],
+      redoStack: [],
     });
   },
 
@@ -121,6 +148,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   rotateCurrentPage: async (delta) => {
     const { pdfLibDoc, currentPageIndex } = get();
     if (!pdfLibDoc) return;
+    await pushUndoSnapshot(get, set);
     engineRotatePage(pdfLibDoc, currentPageIndex, delta);
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({ pdfJsDoc, pageCount, isDirty: true });
@@ -129,6 +157,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   deletePage: async (pageIndex) => {
     const { pdfLibDoc, currentPageIndex } = get();
     if (!pdfLibDoc || pdfLibDoc.getPageCount() <= 1) return;
+    await pushUndoSnapshot(get, set);
     engineDeletePage(pdfLibDoc, pageIndex);
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({
@@ -142,6 +171,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   movePage: async (fromIndex, toIndex) => {
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) return;
+    await pushUndoSnapshot(get, set);
     const order = pdfLibDoc.getPageIndices();
     const [moved] = order.splice(fromIndex, 1);
     order.splice(toIndex, 0, moved);
@@ -153,6 +183,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   addImagesAsPages: async (images) => {
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) return;
+    await pushUndoSnapshot(get, set);
     for (const imageBytes of images) {
       await appendImageAsPage(pdfLibDoc, imageBytes);
     }
@@ -163,6 +194,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   mergePdfBytes: async (bytes) => {
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) return;
+    await pushUndoSnapshot(get, set);
     await mergeDocumentInto(pdfLibDoc, bytes);
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({ pdfJsDoc, pageCount, isDirty: true });
@@ -178,6 +210,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   addTextAt: async (pageIndex, xRatio, yRatio, text, fontSize, colorHex) => {
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) return;
+    await pushUndoSnapshot(get, set);
     await drawTextOverlay(pdfLibDoc, { pageIndex, xRatio, yRatio, text, fontSize, colorHex });
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({ pdfJsDoc, pageCount, isDirty: true });
@@ -186,6 +219,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   addImageAt: async (pageIndex, xRatio, yRatio, widthRatio, heightRatio, imageBytes) => {
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) return;
+    await pushUndoSnapshot(get, set);
     await drawImageOverlay(pdfLibDoc, { pageIndex, xRatio, yRatio, widthRatio, heightRatio, imageBytes });
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({ pdfJsDoc, pageCount, isDirty: true });
@@ -197,6 +231,9 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     set({ formFields: listFormFields(pdfLibDoc) });
   },
 
+  // No undo snapshot here: this fires on every keystroke, and snapshotting per
+  // character would make undo useless. Structural edits (pages, overlays, flatten)
+  // remain undoable; retyping a field is the "undo" for form filling.
   updateFormFieldValue: async (field, value) => {
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) return;
@@ -213,12 +250,49 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   flattenForm: async () => {
     const { pdfLibDoc } = get();
     if (!pdfLibDoc) return;
+    await pushUndoSnapshot(get, set);
     engineFlattenForm(pdfLibDoc);
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({ pdfJsDoc, pageCount, isDirty: true, formFields: [] });
   },
 
   setLastSignature: (dataUrl) => set({ lastSignatureDataUrl: dataUrl }),
+
+  undo: async () => {
+    const { pdfLibDoc, undoStack } = get();
+    if (!pdfLibDoc || undoStack.length === 0) return;
+    const currentBytes = await saveToBytes(pdfLibDoc);
+    const previousBytes = undoStack[undoStack.length - 1];
+    const { pdfLibDoc: restoredDoc, pdfJsDoc } = await loadPdf(previousBytes);
+    set((state) => ({
+      pdfLibDoc: restoredDoc,
+      pdfJsDoc,
+      pageCount: restoredDoc.getPageCount(),
+      currentPageIndex: Math.min(state.currentPageIndex, restoredDoc.getPageCount() - 1),
+      formFields: listFormFields(restoredDoc),
+      undoStack: state.undoStack.slice(0, -1),
+      redoStack: [...state.redoStack, currentBytes].slice(-MAX_HISTORY),
+      isDirty: true,
+    }));
+  },
+
+  redo: async () => {
+    const { pdfLibDoc, redoStack } = get();
+    if (!pdfLibDoc || redoStack.length === 0) return;
+    const currentBytes = await saveToBytes(pdfLibDoc);
+    const nextBytes = redoStack[redoStack.length - 1];
+    const { pdfLibDoc: restoredDoc, pdfJsDoc } = await loadPdf(nextBytes);
+    set((state) => ({
+      pdfLibDoc: restoredDoc,
+      pdfJsDoc,
+      pageCount: restoredDoc.getPageCount(),
+      currentPageIndex: Math.min(state.currentPageIndex, restoredDoc.getPageCount() - 1),
+      formFields: listFormFields(restoredDoc),
+      redoStack: state.redoStack.slice(0, -1),
+      undoStack: [...state.undoStack, currentBytes].slice(-MAX_HISTORY),
+      isDirty: true,
+    }));
+  },
 
   exportBytes: async () => {
     const { pdfLibDoc } = get();

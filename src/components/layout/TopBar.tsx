@@ -22,6 +22,10 @@ export function TopBar() {
   const newBlankDocument = useDocumentStore((s) => s.newBlankDocument);
   const exportBytes = useDocumentStore((s) => s.exportBytes);
   const hasDoc = useDocumentStore((s) => s.pdfLibDoc !== null);
+  const undo = useDocumentStore((s) => s.undo);
+  const redo = useDocumentStore((s) => s.redo);
+  const canUndo = useDocumentStore((s) => s.undoStack.length > 0);
+  const canRedo = useDocumentStore((s) => s.redoStack.length > 0);
 
   async function handleOpen() {
     const result = await window.modifPdf.openPdf();
@@ -55,6 +59,15 @@ export function TopBar() {
       </button>
       <button className="primary" onClick={handleSave} disabled={isBusy || !hasDoc}>
         Enregistrer sous…
+      </button>
+
+      <div style={{ width: 1, alignSelf: "stretch", background: "var(--border)", margin: "0 8px" }} />
+
+      <button onClick={() => undo()} disabled={!canUndo} title="Annuler (Ctrl+Z)">
+        ↶ Annuler
+      </button>
+      <button onClick={() => redo()} disabled={!canRedo} title="Rétablir (Ctrl+Y)">
+        ↷ Rétablir
       </button>
 
       <div style={{ width: 1, alignSelf: "stretch", background: "var(--border)", margin: "0 8px" }} />
