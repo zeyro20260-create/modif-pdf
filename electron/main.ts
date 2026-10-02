@@ -80,6 +80,18 @@ ipcMain.handle("dialog:openImages", async () => {
   return files;
 });
 
+// Only plain .ttf names inside the Windows fonts folder are readable (no path traversal).
+ipcMain.handle("fonts:read", async (_event, fileName: string) => {
+  if (!/^[\w-]+\.ttf$/i.test(fileName)) return null;
+  const dir = path.join(process.env.WINDIR ?? "C:\\Windows", "Fonts");
+  try {
+    const data = await fs.readFile(path.join(dir, fileName));
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  } catch {
+    return null;
+  }
+});
+
 ipcMain.handle("dialog:savePdf", async (_event, suggestedName: string, data: ArrayBuffer) => {
   const result = await dialog.showSaveDialog(mainWindow!, {
     title: "Enregistrer le PDF",

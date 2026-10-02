@@ -12,6 +12,8 @@ import {
   appendImageAsPage,
   extractPagesAsNewDocument,
   drawTextOverlay,
+  countPageTextRuns,
+  type TextOverlayOptions,
   drawImageOverlay,
   listFormFields,
   setFormFieldValue as engineSetFormFieldValue,
@@ -20,7 +22,17 @@ import {
 } from "@/lib/pdfEngine";
 import { detectImageFormat } from "@/lib/imageFormat";
 import { arrayBufferToDataUrl, loadImageNaturalSize } from "@/lib/dataUrl";
-import type { ToolId, FormFieldState, DraftOverlay } from "./documentTypes";
+import type { ToolId, FormFieldState, DraftOverlay, PageTextItem } from "./documentTypes";
+import { matchCatalogFont, catalogFontById, catalogFileName } from "@/lib/fontCatalog";
+
+/** Colours sampled from the page when a replacement starts (one entry per piece of the line). */
+export interface ReplaceInit {
+  bgHex: string;
+  colorHex: string;
+  prefixColors?: { bgHex: string; fgHex: string };
+  tailColors?: { bgHex: string; fgHex: string };
+  neighbors?: Array<{ item: PageTextItem; bgHex: string; fgHex: string }>;
+}
 
 interface DocumentState {
   fileName: string | null;
@@ -53,10 +65,11 @@ interface DocumentState {
   mergePdfBytes: (bytes: ArrayBuffer) => Promise<void>;
   splitCurrentPageOut: (pageIndex: number) => Promise<ArrayBuffer>;
 
-  addTextAt: (pageIndex: number, xRatio: number, yRatio: number, text: string, fontSize: number, colorHex: string) => Promise<void>;
+  addTextAt: (opts: TextOverlayOptions) => Promise<void>;
   addImageAt: (pageIndex: number, xRatio: number, yRatio: number, widthRatio: number, heightRatio: number, imageBytes: ArrayBuffer) => Promise<void>;
 
   addDraftText: (pageIndex: number, xRatio: number, yRatio: number) => string;
+  addDraftReplaceText: (pageIndex: number, item: PageTextItem, init: ReplaceInit) => string;
   addDraftImage: (pageIndex: number, xRatio: number, yRatio: number, imageBytes: ArrayBuffer) => Promise<string>;
   updateDraftOverlay: (id: string, patch: Partial<DraftOverlay>) => void;
   removeDraftOverlay: (id: string) => void;
@@ -76,6 +89,17 @@ interface DocumentState {
 }
 
 const MAX_HISTORY = 25;
+
+/** Reads the Windows font file for a catalog font; null (-> built-in PDF font) if unavailable. */
+async function loadFontFile(fontId: string, style: { bold: boolean; italic: boolean }) {
+  const fileName = catalogFileName(catalogFontById(fontId), style);
+  try {
+    const bytes = await window.modifPdf.readSystemFont(fileName);
+    return bytes ? { key: fileName, bytes } : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 async function resync(pdfLibDoc: PDFDocument) {
   const pdfJsDoc = await resyncPdfJs(pdfLibDoc);
@@ -227,11 +251,13 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     return saveToBytes(extracted);
   },
 
-  addTextAt: async (pageIndex, xRatio, yRatio, text, fontSize, colorHex) => {
-    const { pdfLibDoc } = get();
+  addTextAt: async (opts) => {
+    const { pdfLibDoc, pdfJsDoc: currentJsDoc } = get();
     if (!pdfLibDoc) return;
+    // Counted before drawing so the covers can tell the old text they hide from the text added now.
+    const runsBefore = opts.replace && currentJsDoc ? await countPageTextRuns(currentJsDoc, opts.pageIndex) : undefined;
     await pushUndoSnapshot(get, set);
-    await drawTextOverlay(pdfLibDoc, { pageIndex, xRatio, yRatio, text, fontSize, colorHex });
+    await drawTextOverlay(pdfLibDoc, { ...opts, runsBefore });
     const { pdfJsDoc, pageCount } = await resync(pdfLibDoc);
     set({ pdfJsDoc, pageCount, isDirty: true });
   },
@@ -256,6 +282,49 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
       fontSize: 16,
       colorHex: "#111111",
       text: "",
+      fontStyle: { family: "sans", bold: false, italic: false },
+      fontId: "arial",
+    };
+    set((state) => ({ draftOverlays: [...state.draftOverlays, draft] }));
+    return id;
+  },
+
+  addDraftReplaceText: (pageIndex, item, { bgHex, colorHex, prefixColors, tailColors, neighbors }) => {
+    const id = crypto.randomUUID();
+    const draft: DraftOverlay = {
+      id,
+      pageIndex,
+      kind: "text",
+      xRatio: item.xRatio,
+      yRatio: item.yRatio,
+      fontSize: Math.round(item.fontSizePt * 10) / 10,
+      colorHex,
+      text: item.str,
+      fontStyle: item.fontStyle,
+      fontId: matchCatalogFont(item.fontName, item.fontStyle).id,
+      replace: {
+        widthRatio: item.widthRatio,
+        heightRatio: item.heightRatio,
+        baselineRatio: item.baselineRatio,
+        bgHex,
+        originalText: item.str,
+        originalFontSize: Math.round(item.fontSizePt * 10) / 10,
+        originalColorHex: colorHex,
+        originalFontId: matchCatalogFont(item.fontName, item.fontStyle).id,
+        originalStyle: item.fontStyle,
+        prefix: item.prefix && prefixColors ? { ...item.prefix, bgHex: prefixColors.bgHex, colorHex: prefixColors.fgHex } : undefined,
+        tail: item.tail && tailColors ? { ...item.tail, bgHex: tailColors.bgHex, colorHex: tailColors.fgHex } : undefined,
+        neighbors: neighbors?.map(({ item: n, bgHex: nBg, fgHex }) => ({
+          str: n.str,
+          xRatio: n.xRatio,
+          widthRatio: n.widthRatio,
+          fontSizePt: n.fontSizePt,
+          fontStyle: n.fontStyle,
+          fontId: matchCatalogFont(n.fontName, n.fontStyle).id,
+          bgHex: nBg,
+          colorHex: fgHex,
+        })),
+      },
     };
     set((state) => ({ draftOverlays: [...state.draftOverlays, draft] }));
     return id;
@@ -308,16 +377,67 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   },
 
   commitDraftOverlay: async (id) => {
-    const overlay = get().draftOverlays.find((o) => o.id === id);
-    if (!overlay) return;
-    if (overlay.kind === "text") {
-      if (overlay.text.trim().length > 0) {
-        await get().addTextAt(overlay.pageIndex, overlay.xRatio, overlay.yRatio, overlay.text, overlay.fontSize, overlay.colorHex);
+    try {
+      const overlay = get().draftOverlays.find((o) => o.id === id);
+      if (!overlay) return;
+      if (overlay.kind === "text") {
+        const { replace } = overlay;
+        // A replacement left untouched is dropped so merely clicking a line doesn't repaint it.
+        const unchanged =
+          replace &&
+          overlay.text === replace.originalText &&
+          overlay.fontSize === replace.originalFontSize &&
+          overlay.colorHex === replace.originalColorHex &&
+          overlay.fontId === replace.originalFontId &&
+        overlay.fontStyle.bold === replace.originalStyle.bold &&
+        overlay.fontStyle.italic === replace.originalStyle.italic;
+        // An emptied replacement is still committed: it erases the original text.
+        if (!unchanged && (replace || overlay.text.trim().length > 0)) {
+          const { pdfLibDoc } = get();
+          if (!pdfLibDoc) return;
+            const fontFile = await loadFontFile(overlay.fontId, overlay.fontStyle);
+          // The untouched rest of the line keeps its original font even if the new text uses another.
+          const sameAsOriginal =
+            !replace ||
+            (overlay.fontId === replace.originalFontId &&
+              overlay.fontStyle.bold === replace.originalStyle.bold &&
+              overlay.fontStyle.italic === replace.originalStyle.italic);
+          const restFont =
+            replace && !sameAsOriginal
+              ? { fontFile: await loadFontFile(replace.originalFontId, replace.originalStyle) }
+              : undefined;
+          const neighbors = replace?.neighbors
+            ? await Promise.all(
+                replace.neighbors.map(async (n) => ({
+                  part: { str: n.str, xRatio: n.xRatio, widthRatio: n.widthRatio, bgHex: n.bgHex, colorHex: n.colorHex },
+                  fontSize: n.fontSizePt,
+                  fontStyle: n.fontStyle,
+                  fontFile: await loadFontFile(n.fontId, n.fontStyle),
+                }))
+              )
+            : undefined;
+          await get().addTextAt({
+            pageIndex: overlay.pageIndex,
+            xRatio: overlay.xRatio,
+            yRatio: overlay.yRatio,
+            text: overlay.text,
+            fontSize: overlay.fontSize,
+            colorHex: overlay.colorHex,
+            fontStyle: overlay.fontStyle,
+            fontFile,
+            restFont,
+            neighbors,
+            replace,
+          });
+        }
+      } else {
+        await get().addImageAt(overlay.pageIndex, overlay.xRatio, overlay.yRatio, overlay.widthRatio, overlay.heightRatio, overlay.imageBytes);
       }
-    } else {
-      await get().addImageAt(overlay.pageIndex, overlay.xRatio, overlay.yRatio, overlay.widthRatio, overlay.heightRatio, overlay.imageBytes);
+      set((state) => ({ draftOverlays: state.draftOverlays.filter((o) => o.id !== id) }));
+    } catch (err) {
+      // The draft stays on screen so nothing typed is lost; tell the user why it didn't apply.
+      set({ errorMessage: `Impossible de valider la modification : ${(err as Error).message}` });
     }
-    set((state) => ({ draftOverlays: state.draftOverlays.filter((o) => o.id !== id) }));
   },
 
   commitAllDraftOverlays: async () => {

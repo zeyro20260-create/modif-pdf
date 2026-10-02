@@ -113,3 +113,8 @@ textarea {
   text-align: center;
   color: var(--text-muted);
 }
+
+.text-hit:hover {
+  background: rgba(79, 140, 255, 0.08);
+  outline: 1px dashed var(--accent);
+}

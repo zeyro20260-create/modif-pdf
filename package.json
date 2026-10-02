@@ -19,6 +19,7 @@
     "lint": "eslint src electron --ext .ts,.tsx"
   },
   "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.6.82",
     "react": "^18.3.1",
