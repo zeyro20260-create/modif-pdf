@@ -43,7 +43,7 @@ src/                       Renderer (React)
     dataUrl.ts                Conversion dataURL (signature dessinée) -> ArrayBuffer
   App.tsx / main.tsx
 
-resources/                 Icônes pour electron-builder (à fournir avant packaging)
+resources/                 icon.ico / icon.png (générées par scripts/generate-icon.cjs)
 ```
 
 ## Fonctionnalités V1 (déjà en place dans ce squelette)
@@ -69,7 +69,6 @@ resources/                 Icônes pour electron-builder (à fournir avant packa
 - OCR sur PDF scannés.
 - Édition "in place" du texte natif du PDF (lecture du content stream, remplacement heuristique).
 - Export d'images depuis les pages PDF, conversion PDF -> images.
-- Icône et installeur (`resources/icon.ico` + `npm run dist`).
 
 ## Démarrer en développement
 
@@ -87,7 +86,10 @@ Cela lance Vite (serveur de dev React sur `localhost:5173`) et Electron en paral
 npm run dist
 ```
 
-Génère un installeur NSIS dans `release/`. Fournissez d'abord `resources/icon.ico`.
+Génère un installeur NSIS (`ModifPDF Setup <version>.exe`) dans `release/`. Premier lancement :
+electron-builder télécharge ses outils (NSIS, etc.) dans un cache local, ce qui peut prendre un
+moment ; les lancements suivants réutilisent ce cache. L'installeur n'exige pas les droits
+administrateur (installation par utilisateur) et propose de choisir le dossier d'installation.
 
 ## Vérifications
 
